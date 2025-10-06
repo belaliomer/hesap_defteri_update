@@ -15,7 +15,7 @@ except Exception:
     _HAS_REQUESTS = False
 
 # ---------- GÜNCELLEME AYARLARI (burayı kendi raw URL'inle değiştir) ----------
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/yourusername/yourrepo/main/browni_kodu.py"
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/belaliomer/hesap_defteri_update/refs/heads/main/hesap_defteri.py"
 # ---------- GÜNCELLEME FONKSİYONLARI ----------
 def _show_update_prompt_and_act(latest_code_text):
     # show prompt using a temporary hidden Tk root (safe even before main GUI)
@@ -467,3 +467,4 @@ do_buck_calc()
 do_fly_calc()
 
 root.mainloop()
+
