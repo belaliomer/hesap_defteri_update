@@ -17,7 +17,7 @@ except Exception:
     _HAS_REQUESTS = False
 
 # ----------------- GÜNCELLEME AYARLARI -----------------
-LOCAL_VERSION = "1.0.0"  # mevcut yerel sürümünü buraya yaz
+LOCAL_VERSION = "1.0.1"  # mevcut yerel sürümünü buraya yaz
 VERSION_URL = "https://raw.githubusercontent.com/belaliomer/hesap_defteri_update/refs/heads/main/version.txt"
 UPDATE_URL = "https://raw.githubusercontent.com/belaliomer/hesap_defteri_update/refs/heads/main/hesap_defteri.py"
 
@@ -524,3 +524,4 @@ except:
     pass
 
 root.mainloop()
+
