@@ -1,92 +1,112 @@
+# boost_buck_flyback_updatable.py
+# Browni kodu (kullanıcının verdiği orijinal hesaplayıcı) ile
+# otomatik güncelleme ve kaydırma (scroll) entegrasyonu.
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
-import sys
-import os
-import tempfile
+import sys, os, tempfile, threading
 
-# requests only used for update check/download; if not installed, update is skipped
+# requests only for update check/download (optional)
 try:
     import requests
     _HAS_REQUESTS = True
 except Exception:
     _HAS_REQUESTS = False
 
-# ---------- GÜNCELLEME AYARLARI (burayı kendi raw URL'inle değiştir) ----------
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/belaliomer/hesap_defteri_update/refs/heads/main/hesap_defteri.py"
-# ---------- GÜNCELLEME FONKSİYONLARI ----------
-def _show_update_prompt_and_act(latest_code_text):
-    # show prompt using a temporary hidden Tk root (safe even before main GUI)
-    tmp = tk.Tk()
-    tmp.withdraw()
-    try:
-        answer = messagebox.askyesno("Güncelleme Var", "Yeni sürüm bulundu. Güncellemek ister misiniz?")
-        if answer:
-            # write to temporary file and run it
-            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".py", prefix="browni_update_")
-            tmp_file.write(latest_code_text.encode("utf-8"))
-            tmp_file.close()
-            # try to run the new script and then exit
-            try:
-                if sys.platform.startswith("win"):
-                    os.startfile(tmp_file.name)
-                else:
-                    # on POSIX, spawn via python
-                    os.execv(sys.executable, [sys.executable, tmp_file.name])
-            except Exception:
-                # fallback: try subprocess
-                try:
-                    import subprocess
-                    subprocess.Popen([sys.executable, tmp_file.name])
-                except Exception:
-                    pass
-            finally:
-                tmp.destroy()
-                sys.exit(0)
-    except Exception:
-        tmp.destroy()
+# ----------------- GÜNCELLEME AYARLARI -----------------
+LOCAL_VERSION = "1.0.0"  # mevcut yerel sürümünü buraya yaz
+VERSION_URL = "https://raw.githubusercontent.com/belaliomer/hesap_defteri_update/refs/heads/main/version.txt"
+UPDATE_URL = "https://raw.githubusercontent.com/belaliomer/hesap_defteri_update/refs/heads/main/hesap_defteri.py"
 
 def check_and_offer_update():
+    """Versiyon kontrolü yap, popup göster, 'evet' ise dosyayı indirip yeniden başlat."""
     if not _HAS_REQUESTS:
+        # requests yoksa sessizce atla
         return
     try:
-        r = requests.get(GITHUB_RAW_URL, timeout=6)
-        if r.status_code == 200:
-            latest = r.text
-            # simple difference check: if remote differs from local file content, propose update
-            try:
-                with open(__file__, "r", encoding="utf-8") as f:
-                    local = f.read()
-                if latest != local:
-                    _show_update_prompt_and_act(latest)
-            except Exception:
-                # if reading __file__ fails, still offer update
-                _show_update_prompt_and_act(latest)
+        r = requests.get(VERSION_URL, timeout=6)
+        if r.status_code != 200:
+            return
+        remote_version = r.text.strip()
+        # debug print
+        # print("local:", LOCAL_VERSION, "remote:", remote_version)
+        if remote_version != LOCAL_VERSION:
+            # show a calm prompt
+            root = tk.Tk()
+            root.withdraw()
+            ans = messagebox.askyesno("Güncelleme Mevcut",
+                                      f"Güncel sürüm {remote_version} mevcut.\nGüncellemek ister misiniz?")
+            if ans:
+                try:
+                    r2 = requests.get(UPDATE_URL, timeout=12)
+                    r2.raise_for_status()
+                    new_code = r2.text
+                    # write to temp file first
+                    tmpf = tempfile.NamedTemporaryFile(delete=False, suffix=".py", prefix="browni_update_")
+                    tmpf.write(new_code.encode("utf-8"))
+                    tmpf.close()
+                    # Try to replace current file atomically: write to same path
+                    current_path = os.path.abspath(sys.argv[0])
+                    try:
+                        # backup current file
+                        backup_path = current_path + ".backup"
+                        try:
+                            os.replace(current_path, backup_path)
+                        except Exception:
+                            # fallback copy
+                            import shutil
+                            shutil.copy(current_path, backup_path)
+                        # move temp to current
+                        os.replace(tmpf.name, current_path)
+                    except Exception:
+                        # if replacement fails, just launch temp and exit
+                        try:
+                            if sys.platform.startswith("win"):
+                                os.startfile(tmpf.name)
+                            else:
+                                os.execv(sys.executable, [sys.executable, tmpf.name])
+                        except Exception:
+                            pass
+                        finally:
+                            root.destroy()
+                            sys.exit(0)
+                    # restart using execv (replace current process)
+                    messagebox.showinfo("Güncelleme", "Güncelleme tamamlandı. Uygulama yeniden başlatılıyor.")
+                    root.destroy()
+                    os.execv(sys.executable, [sys.executable, current_path])
+                except Exception as e:
+                    messagebox.showerror("Güncelleme Hatası", f"Güncelleme sırasında hata: {e}")
+                    try:
+                        root.destroy()
+                    except:
+                        pass
+            else:
+                try:
+                    root.destroy()
+                except:
+                    pass
     except Exception:
-        # network/error -> ignore silently
+        # ağ vs hata -> atla
         return
 
-# Run the update check before starting the main GUI loop (but after imports)
+# --------- Eğer istersen güncelleme check'i yeni thread'te çağır; GUI bloklanmasın ---------
+# Ancak prompt modal olduğu için GUI başlamadan önce çağırmak kullanıcı açısından daha net.
 try:
-    # call update check once; if no requests or network fails, nothing happens
+    # Only attempt if requests available; wrap in try to avoid crashes
     if _HAS_REQUESTS:
-        # Use a hidden temporary Tk to allow messagebox on platforms where needed
-        # Note: if running in contexts without display, this may raise; so wrap
-        try:
-            check_and_offer_update()
-        except Exception:
-            pass
+        # call check synchronously before GUI shows
+        # if network slow, you may want to run in background and show a subtle indicator
+        check_and_offer_update()
 except Exception:
     pass
 
-# ---------- burada itibaren "browni kodu" birebir başlıyor ----------
-import tkinter as tk
-from tkinter import ttk, messagebox
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import numpy as np
+# ----------------- BURADAN İTİBAREN BROWNI KODU (ASLI) -----------------
+# (Aşağıdaki kod, senin önce verdiğin browni kodunun hesaplama ve GUI kısmıdır.
+#  Scroll özelliği için parametre panelleri kayan çerçeve içine alındı. 
+#  Hesaplama mantığına dokunulmadı.)
 
 # scipy optional for triangle wave; fallback if not available
 try:
@@ -131,7 +151,9 @@ def calc_timer_from_inputs(f_clk, f_pwm, psc_fix, arr_fix, psc_val_str, arr_val_
 # ---------- Pencere ve stil ----------
 root = tk.Tk()
 root.title("Elektronik Hesap Makinesi - Boost/Buck/Flyback")
+# Keep original size (user requested not to shrink), but allow resizing
 root.geometry("1250x820")
+root.minsize(1000,700)
 
 FONT_BASE = 13
 LABEL_FONT = ("Segoe UI", FONT_BASE)
@@ -141,9 +163,6 @@ MONO_FONT = ("Consolas", FONT_BASE)
 style = ttk.Style()
 style.configure("TNotebook.Tab", font=("Segoe UI", FONT_BASE+1))
 
-notebook = ttk.Notebook(root)
-notebook.pack(fill="both", expand=True, padx=8, pady=6)
-
 # helper to create matplotlib canvas
 def make_canvas(master, figsize=(8,4.5)):
     fig = plt.Figure(figsize=figsize, dpi=100)
@@ -151,11 +170,44 @@ def make_canvas(master, figsize=(8,4.5)):
     canvas.get_tk_widget().pack(side="bottom", fill="both", expand=True)
     return fig, canvas
 
+# helper to create a scrollable frame (vertical scrollbar)
+def make_scrollable_frame(parent, width=420, height=520):
+    """Return inner_frame, and the outer container (to pack right side panels relative)."""
+    container = tk.Frame(parent)
+    canvas = tk.Canvas(container, width=width, height=height)
+    scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas)
+
+    inner.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    canvas.create_window((0,0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    # mousewheel bindings for convenience
+    def _on_mousewheel(event):
+        # For Windows / Mac differences
+        delta = -1 * (event.delta if hasattr(event, "delta") else event.delta)
+        canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+    # Bindings may interfere; keep simple: bind to canvas
+    canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+    # pack them
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+    return container, inner
+
+notebook = ttk.Notebook(root)
+notebook.pack(fill="both", expand=True, padx=8, pady=6)
+
 # ---------- BOOST SEKME ----------
 frame_boost = ttk.Frame(notebook)
 notebook.add(frame_boost, text="Boost")
 
-left_b = tk.Frame(frame_boost); left_b.pack(side="left", fill="y", padx=10, pady=8)
+# make scrollable left parameter area
+left_container_b, left_b = make_scrollable_frame(frame_boost, width=420, height=520)
+left_container_b.pack(side="left", fill="y", padx=10, pady=8)
 right_b = tk.Frame(frame_boost); right_b.pack(side="right", fill="y", padx=10, pady=8)
 fig_frame_b = tk.Frame(frame_boost); fig_frame_b.pack(side="bottom", fill="both", expand=True, padx=10, pady=6)
 
@@ -203,7 +255,8 @@ fig_b, canvas_b = make_canvas(fig_frame_b)
 frame_buck = ttk.Frame(notebook)
 notebook.add(frame_buck, text="Buck")
 
-left_k = tk.Frame(frame_buck); left_k.pack(side="left", fill="y", padx=10, pady=8)
+left_container_k, left_k = make_scrollable_frame(frame_buck, width=420, height=520)
+left_container_k.pack(side="left", fill="y", padx=10, pady=8)
 right_k = tk.Frame(frame_buck); right_k.pack(side="right", fill="y", padx=10, pady=8)
 fig_frame_k = tk.Frame(frame_buck); fig_frame_k.pack(side="bottom", fill="both", expand=True, padx=10, pady=6)
 
@@ -243,7 +296,8 @@ fig_k, canvas_k = make_canvas(fig_frame_k)
 frame_f = ttk.Frame(notebook)
 notebook.add(frame_f, text="Flyback")
 
-left_f = tk.Frame(frame_f); left_f.pack(side="left", fill="y", padx=10, pady=8)
+left_container_f, left_f = make_scrollable_frame(frame_f, width=420, height=520)
+left_container_f.pack(side="left", fill="y", padx=10, pady=8)
 right_f = tk.Frame(frame_f); right_f.pack(side="right", fill="y", padx=10, pady=8)
 fig_frame_f = tk.Frame(frame_f); fig_frame_f.pack(side="bottom", fill="both", expand=True, padx=10, pady=6)
 
@@ -462,9 +516,11 @@ btn_k_calc.config(command=do_buck_calc)
 btn_f_calc.config(command=do_fly_calc)
 
 # başta hepsi için bir hesap çalıştır (varsayılanları göster)
-do_boost_calc()
-do_buck_calc()
-do_fly_calc()
+try:
+    do_boost_calc()
+    do_buck_calc()
+    do_fly_calc()
+except:
+    pass
 
 root.mainloop()
-
