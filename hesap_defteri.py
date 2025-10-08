@@ -1,130 +1,51 @@
-# boost_buck_flyback_updatable.py
-# Browni kodu (kullanıcının verdiği orijinal hesaplayıcı) ile
-# otomatik güncelleme ve kaydırma (scroll) entegrasyonu.
+# hesap_defteri.py
+# Tam sürüm: Boost / Buck / Flyback hesaplayıcı + scroll UI + EXE güncelleme
+# Not: Güncelleme için requests gereklidir; yoksa check atlanır.
 
+import os
+import sys
+import tempfile
+import subprocess
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
+import math
+import time
+
+# plotting
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
-import sys, os, tempfile, threading
 
-# requests only for update check/download (optional)
+# optional libs
 try:
     import requests
     _HAS_REQUESTS = True
 except Exception:
     _HAS_REQUESTS = False
 
-# ----------------- GÜNCELLEME AYARLARI -----------------
-LOCAL_VERSION = "1.0.2"  # mevcut yerel sürümünü buraya yaz
+# ---------- AYARLAR (BURADAN DEĞİŞTİR) ----------
+LOCAL_VERSION = "1.0.1"  # yerel sürüm
 VERSION_URL = "https://raw.githubusercontent.com/belaliomer/hesap_defteri_update/refs/heads/main/version.txt"
-UPDATE_URL = "https://raw.githubusercontent.com/belaliomer/hesap_defteri_update/refs/heads/main/hesap_defteri.py"
+# EXE_URL: GitHub Releases direct download link veya raw link to exe in repo
+EXE_URL = "https://github.com/belaliomer/hesap_defteri_update/releases/latest/download/hesap_defteri.exe"
+# Eğer EXE'yi raw dosya olarak tutuyorsan: raw.githubusercontent.com/.../hesap_defteri.exe
+# ---------- /AYARLAR ----------
 
-def check_and_offer_update():
-    """Versiyon kontrolü yap, popup göster, 'evet' ise dosyayı indirip yeniden başlat."""
-    if not _HAS_REQUESTS:
-        # requests yoksa sessizce atla
-        return
-    try:
-        r = requests.get(VERSION_URL, timeout=6)
-        if r.status_code != 200:
-            return
-        remote_version = r.text.strip()
-        # debug print
-        # print("local:", LOCAL_VERSION, "remote:", remote_version)
-        if remote_version != LOCAL_VERSION:
-            # show a calm prompt
-            root = tk.Tk()
-            root.withdraw()
-            ans = messagebox.askyesno("Güncelleme Mevcut",
-                                      f"Güncel sürüm {remote_version} mevcut.\nGüncellemek ister misiniz?")
-            if ans:
-                try:
-                    r2 = requests.get(UPDATE_URL, timeout=12)
-                    r2.raise_for_status()
-                    new_code = r2.text
-                    # write to temp file first
-                    tmpf = tempfile.NamedTemporaryFile(delete=False, suffix=".py", prefix="browni_update_")
-                    tmpf.write(new_code.encode("utf-8"))
-                    tmpf.close()
-                    # Try to replace current file atomically: write to same path
-                    current_path = os.path.abspath(sys.argv[0])
-                    try:
-                        # backup current file
-                        backup_path = current_path + ".backup"
-                        try:
-                            os.replace(current_path, backup_path)
-                        except Exception:
-                            # fallback copy
-                            import shutil
-                            shutil.copy(current_path, backup_path)
-                        # move temp to current
-                        os.replace(tmpf.name, current_path)
-                    except Exception:
-                        # if replacement fails, just launch temp and exit
-                        try:
-                            if sys.platform.startswith("win"):
-                                os.startfile(tmpf.name)
-                            else:
-                                os.execv(sys.executable, [sys.executable, tmpf.name])
-                        except Exception:
-                            pass
-                        finally:
-                            root.destroy()
-                            sys.exit(0)
-                    # restart using execv (replace current process)
-                    messagebox.showinfo("Güncelleme", "Güncelleme tamamlandı. Uygulama yeniden başlatılıyor.")
-                    root.destroy()
-                    os.execv(sys.executable, [sys.executable, current_path])
-                except Exception as e:
-                    messagebox.showerror("Güncelleme Hatası", f"Güncelleme sırasında hata: {e}")
-                    try:
-                        root.destroy()
-                    except:
-                        pass
-            else:
-                try:
-                    root.destroy()
-                except:
-                    pass
-    except Exception:
-        # ağ vs hata -> atla
-        return
-
-# --------- Eğer istersen güncelleme check'i yeni thread'te çağır; GUI bloklanmasın ---------
-# Ancak prompt modal olduğu için GUI başlamadan önce çağırmak kullanıcı açısından daha net.
-try:
-    # Only attempt if requests available; wrap in try to avoid crashes
-    if _HAS_REQUESTS:
-        # call check synchronously before GUI shows
-        # if network slow, you may want to run in background and show a subtle indicator
-        check_and_offer_update()
-except Exception:
-    pass
-
-# ----------------- BURADAN İTİBAREN BROWNI KODU (ASLI) -----------------
-# (Aşağıdaki kod, senin önce verdiğin browni kodunun hesaplama ve GUI kısmıdır.
-#  Scroll özelliği için parametre panelleri kayan çerçeve içine alındı. 
-#  Hesaplama mantığına dokunulmadı.)
-
-# scipy optional for triangle wave; fallback if not available
+# ---------- yardımcı fonksiyonlar ----------
 try:
     from scipy import signal
     _HAS_SCIPY = True
 except Exception:
     _HAS_SCIPY = False
 
-# ---------- yardımcı fonksiyonlar ----------
 def triangle_wave(freq, t):
-    """Return triangle wave in range [-1,1] for frequency freq (Hz) at times t (seconds).
-       Uses scipy.signal.sawtooth if available, otherwise piecewise linear."""
+    """Return triangle wave in range [-1,1] for frequency freq (Hz) at times t (seconds)."""
     if _HAS_SCIPY:
         return signal.sawtooth(2 * np.pi * freq * t, 0.5)
     # fallback
     period = 1.0 / freq
     phase = (t % period) / period  # 0..1
-    # symmetric triangle -1..1
     tri = np.where(phase < 0.5, 4 * phase - 1, 3 - 4 * phase)
     return tri
 
@@ -148,10 +69,99 @@ def calc_timer_from_inputs(f_clk, f_pwm, psc_fix, arr_fix, psc_val_str, arr_val_
         ARR_calc = int(max(0, round(f_clk / ((PSC_calc + 1) * f_pwm) - 1)))
     return PSC_calc, ARR_calc
 
+# ---------- Güncelleme fonksiyonları ----------
+def check_update_available():
+    """Kontrol et: online version ile local farklı mı? döner: remote_version veya None"""
+    if not _HAS_REQUESTS:
+        return None
+    try:
+        r = requests.get(VERSION_URL, timeout=6)
+        r.raise_for_status()
+        remote_version = r.text.strip()
+        if remote_version != LOCAL_VERSION:
+            return remote_version
+    except Exception:
+        return None
+    return None
+
+def download_and_launch_exe(remote_version):
+    """EXE'yi indir ve çalıştır. Yeni exe'yi temp'e indirir, çalıştırır ve mevcut süreci kapatır."""
+    if not _HAS_REQUESTS:
+        messagebox.showerror("Güncelleme Hatası", "requests modülü yüklü değil; güncelleme yapılamıyor.")
+        return
+    try:
+        # show small info
+        dlg = tk.Toplevel()
+        dlg.title("Güncelleme")
+        ttk.Label(dlg, text="Yeni sürüm indiriliyor, lütfen bekleyin...").pack(padx=20, pady=20)
+        dlg.update()
+
+        resp = requests.get(EXE_URL, stream=True, timeout=30)
+        resp.raise_for_status()
+        temp_dir = tempfile.gettempdir()
+        filename = f"hesap_defteri_v{remote_version}.exe"
+        new_exe_path = os.path.join(temp_dir, filename)
+        with open(new_exe_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        dlg.destroy()
+        messagebox.showinfo("Güncelleme", "Yeni sürüm indirildi. Uygulama yeniden başlatılıyor.")
+        # Launch new exe
+        try:
+            if sys.platform.startswith("win"):
+                # On Windows, simply start exe
+                subprocess.Popen([new_exe_path], shell=False)
+            else:
+                # Unix-like
+                subprocess.Popen([new_exe_path])
+        except Exception as e:
+            messagebox.showerror("Başlatma Hatası", f"Yeni exe başlatılamadı: {e}")
+        # Exit current process
+        sys.exit(0)
+    except Exception as e:
+        messagebox.showerror("Güncelleme Hatası", f"Güncelleme indirilemedi: {e}")
+
+def check_and_prompt_update_blocking(root_widget):
+    """Bloklayıcı: açılışta çağrılırsa GUI başlamadan popup gösterir.
+       Eğer kullanıcı 'Evet' derse indir ve çalıştır; 'Hayır' derse devam et."""
+    remote = check_update_available()
+    if remote:
+        # küçük bir modal popup
+        try:
+            answer = messagebox.askyesno("Güncelleme Mevcut",
+                                         f"Güncel sürüm {remote} bulundu.\nGüncellemek ister misiniz?")
+            if answer:
+                download_and_launch_exe(remote)
+                # function exits process if successful
+        except Exception:
+            pass
+
+# ---------- GUI: scrollable frame helper ----------
+class ScrollableFrame(ttk.Frame):
+    def __init__(self, container, width=None, height=None, *args, **kwargs):
+        super().__init__(container, *args, **kwargs)
+        canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        self.scrollable_frame = ttk.Frame(canvas)
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # optional mousewheel binding (Windows)
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
 # ---------- Pencere ve stil ----------
 root = tk.Tk()
-root.title("Elektronik Hesap Makinesi - Boost/Buck/Flyback")
-# Keep original size (user requested not to shrink), but allow resizing
+root.title("Elektronik Hesap Makinesi - Boost / Buck / Flyback")
 root.geometry("1250x820")
 root.minsize(1000,700)
 
@@ -163,6 +173,9 @@ MONO_FONT = ("Consolas", FONT_BASE)
 style = ttk.Style()
 style.configure("TNotebook.Tab", font=("Segoe UI", FONT_BASE+1))
 
+notebook = ttk.Notebook(root)
+notebook.pack(fill="both", expand=True, padx=8, pady=6)
+
 # helper to create matplotlib canvas
 def make_canvas(master, figsize=(8,4.5)):
     fig = plt.Figure(figsize=figsize, dpi=100)
@@ -170,48 +183,6 @@ def make_canvas(master, figsize=(8,4.5)):
     canvas.get_tk_widget().pack(side="bottom", fill="both", expand=True)
     return fig, canvas
 
-# helper to create a scrollable frame (vertical scrollbar)
-def make_scrollable_frame(parent, width=420, height=520):
-    """Return inner_frame, and the outer container (to pack right side panels relative)."""
-    container = tk.Frame(parent)
-    canvas = tk.Canvas(container, width=width, height=height)
-    scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
-    inner = tk.Frame(canvas)
-
-    inner.bind(
-        "<Configure>",
-        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-    )
-    canvas.create_window((0,0), window=inner, anchor="nw")
-    canvas.configure(yscrollcommand=scrollbar.set)
-
-    # mousewheel bindings for convenience
-    def _on_mousewheel(event):
-        # For Windows / Mac differences
-        delta = -1 * (event.delta if hasattr(event, "delta") else event.delta)
-        canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-    # Bindings may interfere; keep simple: bind to canvas
-    canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-
-    # pack them
-    canvas.pack(side="left", fill="both", expand=True)
-    scrollbar.pack(side="right", fill="y")
-    return container, inner
-
-notebook = ttk.Notebook(root)
-notebook.pack(fill="both", expand=True, padx=8, pady=6)
-
-# ---------- BOOST SEKME ----------
-frame_boost = ttk.Frame(notebook)
-notebook.add(frame_boost, text="Boost")
-
-# make scrollable left parameter area
-left_container_b, left_b = make_scrollable_frame(frame_boost, width=420, height=520)
-left_container_b.pack(side="left", fill="y", padx=10, pady=8)
-right_b = tk.Frame(frame_boost); right_b.pack(side="right", fill="y", padx=10, pady=8)
-fig_frame_b = tk.Frame(frame_boost); fig_frame_b.pack(side="bottom", fill="both", expand=True, padx=10, pady=6)
-
-tk.Label(left_b, text="Boost - Giriş Parametreleri", font=TITLE_FONT).pack(anchor="w", pady=(0,6))
 def add_entry(parent, label, default):
     tk.Label(parent, text=label, font=LABEL_FONT).pack(anchor="w")
     e = tk.Entry(parent, font=LABEL_FONT)
@@ -219,6 +190,17 @@ def add_entry(parent, label, default):
     e.pack(anchor="w", pady=(0,6))
     return e
 
+# ---------- BOOST SEKME ----------
+frame_boost = ttk.Frame(notebook)
+notebook.add(frame_boost, text="Boost")
+
+left_b_container = ScrollableFrame(frame_boost)
+left_b_container.pack(side="left", fill="y", padx=10, pady=8)
+left_b = left_b_container.scrollable_frame
+right_b = tk.Frame(frame_boost); right_b.pack(side="right", fill="y", padx=10, pady=8)
+fig_frame_b = tk.Frame(frame_boost); fig_frame_b.pack(side="bottom", fill="both", expand=True, padx=10, pady=6)
+
+tk.Label(left_b, text="Boost - Giriş Parametreleri", font=TITLE_FONT).pack(anchor="w", pady=(0,6))
 entry_b_vin = add_entry(left_b, "Vin (V):", 28)
 entry_b_vout = add_entry(left_b, "Vout (V):", 82)
 entry_b_f = add_entry(left_b, "Frekans (kHz):", 8)
@@ -248,26 +230,26 @@ btn_b_calc.pack(pady=(6,12))
 tk.Label(right_b, text="Boost - Sonuçlar", font=TITLE_FONT).pack(anchor="w")
 out_b_text = tk.Text(right_b, width=50, height=28, font=MONO_FONT)
 out_b_text.pack()
-
 fig_b, canvas_b = make_canvas(fig_frame_b)
 
-# ---------- BUCK SEKME (DEFAULTLAR GÜNCELLENDİ) ----------
+# ---------- BUCK SEKME ----------
 frame_buck = ttk.Frame(notebook)
 notebook.add(frame_buck, text="Buck")
 
-left_container_k, left_k = make_scrollable_frame(frame_buck, width=420, height=520)
-left_container_k.pack(side="left", fill="y", padx=10, pady=8)
+left_k_container = ScrollableFrame(frame_buck)
+left_k_container.pack(side="left", fill="y", padx=10, pady=8)
+left_k = left_k_container.scrollable_frame
 right_k = tk.Frame(frame_buck); right_k.pack(side="right", fill="y", padx=10, pady=8)
 fig_frame_k = tk.Frame(frame_buck); fig_frame_k.pack(side="bottom", fill="both", expand=True, padx=10, pady=6)
 
 tk.Label(left_k, text="Buck - Giriş Parametreleri", font=TITLE_FONT).pack(anchor="w", pady=(0,6))
-entry_k_vin = add_entry(left_k, "Vin (V):", 12)          # changed
-entry_k_vout = add_entry(left_k, "Vout (V):", 5)         # changed
-entry_k_f = add_entry(left_k, "Frekans (kHz):", 50)      # changed
-entry_k_L = add_entry(left_k, "L (µH):", 100)            # changed
-entry_k_C = add_entry(left_k, "Cout (µF):", 100)         # changed
-entry_k_ripI = add_entry(left_k, "Tolerans ΔI (A):", 0.1) # changed (100 mA)
-entry_k_ripV = add_entry(left_k, "Tolerans ΔV (V):", 0.1) # changed (0.1 V)
+entry_k_vin = add_entry(left_k, "Vin (V):", 12)
+entry_k_vout = add_entry(left_k, "Vout (V):", 5)
+entry_k_f = add_entry(left_k, "Frekans (kHz):", 50)
+entry_k_L = add_entry(left_k, "L (µH):", 100)
+entry_k_C = add_entry(left_k, "Cout (µF):", 100)
+entry_k_ripI = add_entry(left_k, "Tolerans ΔI (A):", 0.1)
+entry_k_ripV = add_entry(left_k, "Tolerans ΔV (V):", 0.1)
 
 tk.Label(left_k, text="Yük Akımı (A):", font=LABEL_FONT).pack(anchor="w")
 slider_k_Iout = tk.Scale(left_k, from_=0.01, to=1.0, resolution=0.01, orient="horizontal", length=260, font=LABEL_FONT)
@@ -289,15 +271,15 @@ btn_k_calc.pack(pady=(6,12))
 tk.Label(right_k, text="Buck - Sonuçlar", font=TITLE_FONT).pack(anchor="w")
 out_k_text = tk.Text(right_k, width=50, height=28, font=MONO_FONT)
 out_k_text.pack()
-
 fig_k, canvas_k = make_canvas(fig_frame_k)
 
 # ---------- FLYBACK SEKME ----------
 frame_f = ttk.Frame(notebook)
 notebook.add(frame_f, text="Flyback")
 
-left_container_f, left_f = make_scrollable_frame(frame_f, width=420, height=520)
-left_container_f.pack(side="left", fill="y", padx=10, pady=8)
+left_f_container = ScrollableFrame(frame_f)
+left_f_container.pack(side="left", fill="y", padx=10, pady=8)
+left_f = left_f_container.scrollable_frame
 right_f = tk.Frame(frame_f); right_f.pack(side="right", fill="y", padx=10, pady=8)
 fig_frame_f = tk.Frame(frame_f); fig_frame_f.pack(side="bottom", fill="both", expand=True, padx=10, pady=6)
 
@@ -317,10 +299,9 @@ btn_f_calc.pack(pady=(8,12))
 tk.Label(right_f, text="Flyback - Sonuçlar", font=TITLE_FONT).pack(anchor="w")
 out_f_text = tk.Text(right_f, width=50, height=28, font=MONO_FONT)
 out_f_text.pack()
-
 fig_f, canvas_f = make_canvas(fig_frame_f)
 
-# ---------- Hesaplama fonksiyonları ----------
+# ---------- Hesaplama fonksiyonları (tam hali) ----------
 def do_boost_calc():
     try:
         Vin = float(entry_b_vin.get()); Vout = float(entry_b_vout.get())
@@ -336,13 +317,18 @@ def do_boost_calc():
             return
 
         D = 1.0 - Vin / Vout
+        if D <= 0:
+            messagebox.showerror("Hata", "Hesaplanan duty negatif veya sıfır; parametreleri kontrol edin.")
+            return
+
         delta_IL = (Vin * D) / (L * freq)
-        delta_Vout = delta_IL / (8.0 * freq * C)
-        IL_avg = Iout / (1.0 - D)
+        # daha gerçekçi ΔV ~ ΔIL/(8 f C) varsayımı kullanıldı (yaklaşık)
+        delta_Vout = delta_IL / (8.0 * freq * C) if C > 0 else float('inf')
+        IL_avg = Iout / (1.0 - D) if (1.0 - D) != 0 else float('inf')
         IL_min = IL_avg - delta_IL/2.0
         mode = "CCM" if IL_min > 0 else "DCM"
 
-        # önerilen min L,C
+        # önerilen min L,C (toleranslara göre)
         delta_IL_max = ripI_pct * Iout
         delta_V_max = ripV_pct * Vout
         L_min = (Vin * D) / (delta_IL_max * freq) if delta_IL_max > 0 else float('inf')
@@ -371,10 +357,10 @@ def do_boost_calc():
         out_b_text.insert(tk.END, "\n(Not: ΔIL anlık duty sıçramaları içindir; PID/soft-start gerçek ripple'ı düşürür.)\n")
         out_b_text.configure(state="disabled")
 
-        # grafik
+        # grafik çizimi (4 periyot göster)
         fig_b.clf()
         ax1 = fig_b.add_subplot(211); ax2 = fig_b.add_subplot(212)
-        t = np.linspace(0, 4.0 / freq, 600)  # seconds
+        t = np.linspace(0, 4.0 / freq, 800)  # seconds
         tri = triangle_wave(freq, t)
         IL_wave = IL_avg + (delta_IL / 2.0) * tri
         Vout_wave = Vout + (delta_Vout / 2.0) * tri
@@ -386,7 +372,6 @@ def do_boost_calc():
 
     except Exception as e:
         messagebox.showerror("Hata (Boost)", str(e))
-
 
 def do_buck_calc():
     try:
@@ -403,8 +388,12 @@ def do_buck_calc():
             return
 
         D = Vout / Vin
+        if D <= 0:
+            messagebox.showerror("Hata", "Hesaplanan duty negatif veya sıfır; parametreleri kontrol edin.")
+            return
+
         delta_IL = (Vin - Vout) * D / (L * freq)
-        delta_Vout = delta_IL / (8.0 * freq * C)
+        delta_Vout = delta_IL / (8.0 * freq * C) if C > 0 else float('inf')
         IL_avg = Iout
         IL_min = IL_avg - delta_IL / 2.0
         mode = "CCM" if IL_min > 0 else "DCM"
@@ -435,7 +424,7 @@ def do_buck_calc():
         # grafik
         fig_k.clf()
         ax1 = fig_k.add_subplot(211); ax2 = fig_k.add_subplot(212)
-        t = np.linspace(0, 4.0 / freq, 600)
+        t = np.linspace(0, 4.0 / freq, 800)
         tri = triangle_wave(freq, t)
         IL_wave = IL_avg + (delta_IL / 2.0) * tri
         Vout_wave = Vout + (delta_Vout / 2.0) * tri
@@ -448,7 +437,6 @@ def do_buck_calc():
     except Exception as e:
         messagebox.showerror("Hata (Buck)", str(e))
 
-
 def do_fly_calc():
     try:
         Vin = float(entry_f_vin.get()); Vout = float(entry_f_vout.get())
@@ -459,10 +447,15 @@ def do_fly_calc():
         ripI_pct = float(entry_f_ripI.get()) / 100.0
         ripV_pct = float(entry_f_ripV.get()) / 100.0
 
-        denom = Vout + (Vin * (1.0 / nsnp)) if nsnp != 0 else None
-        if denom is None or denom == 0:
-            messagebox.showerror("Hata", "Geçersiz Ns/Np değeri.")
+        if nsnp == 0:
+            messagebox.showerror("Hata", "Ns/Np sıfır olamaz.")
             return
+
+        denom = Vout + (Vin * (1.0 / nsnp))
+        if denom == 0:
+            messagebox.showerror("Hata", "Geçersiz Ns/Np veya gerilim değerleri.")
+            return
+
         D = Vout / denom
         D = max(1e-6, min(0.999999, D))
         Pout = Vout * Iout
@@ -471,7 +464,8 @@ def do_fly_calc():
             Ipk = float('inf')
             delta_I_m = float('inf')
         else:
-            Ipk = np.sqrt(max(0.0, 2.0 * Pout / (Lm * Fs)))
+            # basit approx
+            Ipk = math.sqrt(max(0.0, 2.0 * Pout / (Lm * Fs)))
             delta_I_m = (Vin * D) / (Lm * Fs)
 
         eff = 0.9
@@ -497,7 +491,7 @@ def do_fly_calc():
         # grafik
         fig_f.clf()
         ax1 = fig_f.add_subplot(211); ax2 = fig_f.add_subplot(212)
-        t = np.linspace(0, 4.0 / freq, 600)
+        t = np.linspace(0, 4.0 / freq, 800)
         tri = triangle_wave(freq, t)
         IL_wave = Iavg + (delta_I_m / 2.0) * tri
         Vsec_wave = Vout * np.ones_like(t)
@@ -520,9 +514,29 @@ try:
     do_boost_calc()
     do_buck_calc()
     do_fly_calc()
-except:
+except Exception:
     pass
 
+# Başlangıçta güncelleme kontrolünü ayrı thread'te yap, ama modal istiyorsan blocking çağır
+def start_update_check_thread():
+    if not _HAS_REQUESTS:
+        return
+    def worker():
+        time.sleep(0.8)  # GUI açılışına kısa gecikme ver
+        remote = check_update_available()
+        if remote:
+            # show a modal prompt on main thread
+            def ask_and_run():
+                try:
+                    ans = messagebox.askyesno("Güncelleme Mevcut", f"Güncel sürüm {remote} bulundu. Güncellemek ister misiniz?")
+                    if ans:
+                        download_and_launch_exe(remote)
+                except Exception:
+                    pass
+            root.after(50, ask_and_run)
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+start_update_check_thread()
+
 root.mainloop()
-
-
